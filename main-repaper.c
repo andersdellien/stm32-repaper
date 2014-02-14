@@ -6,35 +6,17 @@
 
 #define LINES_PER_DISPLAY 96
 #define DOTS_PER_LINE 128
-#define BYTES_PER_LINE 32
+#define BYTES_PER_LINE 16
 
-extern unsigned char cat_1_44_bits[];
+extern unsigned char venus_1_44_bits[];
+extern unsigned char aphrodite_1_44_bits[];
 
-typedef unsigned char uint8;
-
-uint8 frame_buffer[32*96];
-
-uint8 char_0[] = {0,0x3c,0x66,0x6e,0x76,0x66,0x66,0x3c};
-
-void render(uint8 * fb, uint8* c)
+struct frame_buffer
 {
-  int i,j;
+  unsigned char data[BYTES_PER_LINE*LINES_PER_DISPLAY];
+};
 
-  for (i=0; i<8; i++)
-  {
-    int l = 128;
-    for (j=0; j<8; j++)
-    {
-      if (c[i] & l)
-      {
-        int k;
-        for (k=0; k<4; k++)
-          fb[32*(k+i*4)+j] = 0xff;
-      }     
-      l /= 2;;
-    }
-  }
-}
+struct frame_buffer fb1, fb2;
 
 typedef enum {           // Image pixel -> Display pixel
 	EPD_compensate,  // B -> W, W -> B (Current Image)
@@ -127,7 +109,7 @@ static void cs_deassert(void)
   GPIO_ResetBits(EPD_CS_GPIO, EPD_CS_PIN);  
 }
 
-void EpdWaitBusy()
+void epd_wait_busy()
 {
   GPIO_SetBits(RED_LED_GPIO, RED_LED_PIN);  
   while (GPIO_ReadInputDataBit(BUSY_GPIO, BUSY_PIN))
@@ -138,9 +120,7 @@ void EpdWaitBusy()
 
 static void cs_strobe() {
   cs_assert();
-  GPIO_SetBits(EPD_CS_GPIO, EPD_CS_PIN);  
   delay_us(10);
-  GPIO_ResetBits(EPD_CS_GPIO, EPD_CS_PIN);  
   cs_deassert();
 }
 
@@ -190,10 +170,10 @@ static void spi_writeheader(unsigned char reg)
   spi_write(0x70);
   spi_write(reg);
 
-  GPIO_SetBits(EPD_CS_GPIO, EPD_CS_PIN);
+  cs_assert();
 }
 
-static void write_line(int line, uint8* data, int value, int stage)
+static void epd_line(int line, unsigned char * data, int stage)
 {
   int i;
 
@@ -201,132 +181,294 @@ static void write_line(int line, uint8* data, int value, int stage)
 
   spi_writeheader(0x0a);
   delay_us(10);
-  GPIO_ResetBits(EPD_CS_GPIO, EPD_CS_PIN);
+  cs_deassert();
   spi_write(0x72);
 
-  for (i = 30; i >= 0; i -= 2)
+  for (i = BYTES_PER_LINE-1; i >= 0; i --)
   {
-    if (data != 0)
-    {
-      uint8 pixels;
+    unsigned char pixels = data[i] & 0xaa;
 
-      pixels = ((data[i] & 0x30) >> 4) | ((data[i] & 0x03) << 2);
-      pixels |= ((data[i+1] & 0x30) << 2) | ((data[i+1] & 0x03) << 6);
-
-      switch(stage) {
-        case EPD_compensate:  // B -> W, W -> B (Current Image)
-          pixels = 0xaa | ((pixels ^ 0xaa) >> 1);
-          break;
-        case EPD_white:       // B -> N, W -> W (Current Image)
-          pixels = 0x55 + ((pixels ^ 0xaa) >> 1);
-          break;
-        case EPD_inverse:     // B -> N, W -> B (New Image)
-          pixels = pixels^0x55;
-          break;
-        case EPD_normal:       // B -> B, W -> W (New Image)
-          break;
-        }
-      spi_write(pixels);
-    }
-    else
-      spi_write(value);
-    EpdWaitBusy();
+    switch(stage) {
+      case EPD_compensate:  // B -> W, W -> B (Current Image)
+        pixels = 0xaa | ((pixels ^ 0xaa) >> 1);
+        break;
+      case EPD_white:       // B -> N, W -> W (Current Image)
+        pixels = 0x55 + ((pixels ^ 0xaa) >> 1);
+        break;
+      case EPD_inverse:     // B -> N, W -> B (New Image)
+        pixels = 0x55 | (pixels ^ 0xaa);
+        break;
+      case EPD_normal:       // B -> B, W -> W (New Image)
+        pixels = 0xaa | (pixels >> 1);
+        break;
+      }
+    spi_write(pixels);
+    epd_wait_busy();
   }
 
-  for (i = 0; i < 24; ++i)
+  for (i = 0; i < LINES_PER_DISPLAY/4; i++)
   {
     if (line / 4 == i) 
       spi_write(0xc0 >> (2 * (line & 0x03)));
     else
       spi_write(0x00);
-    EpdWaitBusy();
+    epd_wait_busy();
   }
 
-  for (i = 0; i < 32; i += 2)
+  for (i = 0; i < BYTES_PER_LINE; i++)
   {
-    if (data)
+    unsigned char pixels = data[i] & 0x55;
+
+    switch(stage)
     {
-      uint8 pixels;
-
-      pixels = (data[i] & 0xc0) | ((data[i] & 0x0c) << 2);
-      pixels |= ((data[i+1] & 0xc0) >> 4) | ((data[i+1] & 0x0c) >> 2);
-
-      switch(stage) {
-        case EPD_compensate:  // B -> W, W -> B (Current Image)
-          pixels = 0xaa | (pixels ^ 0x55);
-          break;
-        case EPD_white:       // B -> N, W -> W (Current Image)
-          pixels = 0x55 + (pixels ^ 0x55);
-          break;
-        case EPD_inverse:     // B -> N, W -> B (New Image)
-          pixels = pixels^0x55;
-          break;
-        case EPD_normal:       // B -> B, W -> W (New Image)
-          break;
-      }
-
-      spi_write(pixels);
+      case EPD_compensate:  // B -> W, W -> B (Current Image)
+        pixels = 0xaa | (pixels ^ 0x55);
+        break;
+      case EPD_white:       // B -> N, W -> W (Current Image)
+        pixels = 0x55 + (pixels ^ 0x55);
+        break;
+      case EPD_inverse:     // B -> N, W -> B (New Image)
+        pixels = 0x55 | ((pixels ^ 0x55) << 1);
+        break;
+      case EPD_normal:       // B -> B, W -> W (New Image)
+        pixels = 0xaa | pixels;
+        break;
     }
-    else
-      spi_write(value);
-    EpdWaitBusy();
+
+     unsigned char p1 = (pixels >> 6) & 0x03;
+     unsigned char p2 = (pixels >> 4) & 0x03;
+     unsigned char p3 = (pixels >> 2) & 0x03;
+     unsigned char p4 = (pixels >> 0) & 0x03;
+     pixels = (p1 << 0) | (p2 << 2) | (p3 << 4) | (p4 << 6);
+  
+    spi_write(pixels);
+    epd_wait_busy();
   }
 
-  GPIO_SetBits(EPD_CS_GPIO, EPD_CS_PIN);
+  cs_assert();
   spi_writesingle(0x02, 0x2f);
 }
 
-void EpdFrameFixed(uint8 fixed_value, EPD_stage stage) {
-  uint8 line;
-  for (line = 0; line < LINES_PER_DISPLAY ; ++line) {
-      write_line(line, 0, fixed_value, stage);
-  }
-}
-
-void EpdFrameData(uint8 * data, EPD_stage stage) {
-  uint8 line;
-  for (line = 0; line < LINES_PER_DISPLAY ; ++line) {
-      write_line(line, data + line * BYTES_PER_LINE, 0, stage);
-  }
-}
-
-void EpdFrameFixedRepeat(uint8 fixed_value, EPD_stage stage) {
-    int ticker = 10;
-    do {
-        EpdFrameFixed(fixed_value, stage);
-    } while (ticker--);
-}
-
-void EpdFrameDataRepeat(uint8 * data, EPD_stage stage) {
-  int ticker = 10;
-  do
-  {
-    EpdFrameData(data, stage);
-  } while (ticker--);
-}
-
-void EpdClear() {
-    EpdFrameFixedRepeat(0xFF, EPD_compensate);
-    EpdFrameFixedRepeat(0xFF, EPD_white);
-    EpdFrameFixedRepeat(0xAA, EPD_inverse);
-    EpdFrameFixedRepeat(0xAA, EPD_normal);
-}
-
-void EpdImage(uint8 *new) {
-  EpdFrameFixedRepeat(0xAA, EPD_compensate);
-  EpdFrameFixedRepeat(0xAA, EPD_white);
-
-  // Draw new image
-//  EpdFrameDataRepeat(new, EPD_inverse);
-  EpdFrameDataRepeat(new, EPD_normal);
-}
-
-int main(void)
+static void epd_line_fixed(int line, int value, int scan_byte)
 {
   int i;
-  int line;
-  int count;
 
+  spi_writesingle(0x04, 0x03);
+
+  spi_writeheader(0x0a);
+  delay_us(10);
+  cs_deassert();
+  spi_write(0x72);
+
+  for (i = 0; i < BYTES_PER_LINE; i++)
+  {
+    spi_write(value);
+    epd_wait_busy();
+  }
+
+  for (i = 0; i < LINES_PER_DISPLAY/4; ++i)
+  {
+    if (scan_byte && (line / 4 == i))
+      spi_write(0xc0 >> (2 * (line & 0x03)));
+    else
+      spi_write(0x00);
+    epd_wait_busy();
+  }
+
+  for (i = 0; i < BYTES_PER_LINE; i++)
+  {
+    spi_write(value);
+    epd_wait_busy();
+  }
+
+  cs_assert();
+  spi_writesingle(0x02, 0x2f);
+}
+
+void epd_frame_fixed(unsigned char fixed_value, int repeat_count)
+{
+  int line;
+  int i;
+
+  for (i=0; i<repeat_count; i++)
+    for (line = 0; line < LINES_PER_DISPLAY; line++)
+      epd_line_fixed(line, fixed_value, 1);
+}
+
+void epd_frame_data(unsigned char * data, int repeat_count, EPD_stage stage)
+{
+  int line;
+  int i;
+
+  for (i=0; i<repeat_count; i++)
+    for (line = 0; line < LINES_PER_DISPLAY; line++)
+      epd_line(line, data + line * BYTES_PER_LINE, stage);
+}
+
+void epd_clear()
+{
+  epd_frame_fixed(0xFF, 10);
+  epd_frame_fixed(0xAA, 10);
+}
+
+void epd_image(struct frame_buffer * old, struct frame_buffer * new)
+{
+  epd_frame_fixed(0xAA, 10);
+
+  // Draw new image
+  epd_frame_data(new->data, 10, EPD_inverse);
+  epd_frame_data(new->data, 10, EPD_normal);
+}
+
+void epd_power_on(void)
+{
+  GPIO_InitTypeDef GPIO_InitStructure;
+
+  GPIO_ResetBits(RESET_GPIO, RESET_PIN);
+  GPIO_ResetBits(PANEL_ON_GPIO, PANEL_ON_PIN);
+  GPIO_ResetBits(DISCHARGE_GPIO, DISCHARGE_PIN);
+  GPIO_ResetBits(BORDER_CONTROL_GPIO, BORDER_CONTROL_PIN);
+  GPIO_ResetBits(EPD_CS_GPIO, EPD_CS_PIN);
+  
+  TIM_Cmd(TIM1, ENABLE);
+
+  delay_ms(5);
+
+  GPIO_SetBits(PANEL_ON_GPIO, PANEL_ON_PIN);
+
+  delay_ms(10);
+
+  GPIO_SetBits(RESET_GPIO, RESET_PIN);
+  GPIO_SetBits(BORDER_CONTROL_GPIO, BORDER_CONTROL_PIN);
+  GPIO_SetBits(EPD_CS_GPIO, EPD_CS_PIN);
+
+  delay_ms(5);
+
+  GPIO_ResetBits(RESET_GPIO, RESET_PIN);
+  delay_ms(5);
+
+  GPIO_SetBits(RESET_GPIO, RESET_PIN);
+  delay_ms(5);
+
+  epd_wait_busy();
+
+  unsigned char channel_select[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xff, 0x00};
+
+  spi_writecommand(0x01, channel_select, 8);  
+
+  // DC/DC frequency
+  spi_writesingle(0x06, 0xFF);
+
+  // high power mode osc
+  spi_writesingle(0x07, 0x9D);
+
+  // disable ADC
+  spi_writesingle(0x08, 0x00);
+
+  unsigned char vcom_level[] = {0xd0, 0x00};
+  spi_writecommand(0x09, vcom_level, 2);
+
+  spi_writesingle(0x04, 0x03);
+
+  delay_ms(5);
+
+  spi_writesingle(0x03, 0x01);
+  spi_writesingle(0x03, 0x00);
+
+  delay_ms(5);
+
+  spi_writesingle(0x05, 0x01);
+
+  delay_ms(30);
+
+  // Disable PWM
+
+  TIM_Cmd(TIM1, DISABLE);
+
+  GPIO_StructInit(&GPIO_InitStructure);
+  GPIO_InitStructure.GPIO_Pin =  GPIO_Pin_8;
+  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
+  GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+  GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
+  GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+  GPIO_ResetBits(GPIOA, GPIO_Pin_8);
+
+  spi_writesingle(0x05, 0x0f);
+
+  delay_ms(30);
+
+  spi_writesingle(0x02, 0x24);
+}
+
+void epd_power_off(void)
+{
+  int i;
+
+  // Nothing frame
+  epd_frame_fixed(0x55, 1);
+
+  // Dummy line
+  epd_line_fixed(0, 0x55, 0);
+
+  delay_ms(25);
+
+  GPIO_ResetBits(BORDER_CONTROL_GPIO, BORDER_CONTROL_PIN);
+
+  delay_ms(300);
+
+  // Latch reset turn on
+  spi_writesingle(0x03, 0x01);
+
+  // Output enable off  
+  spi_writesingle(0x02, 0x05);
+
+  // Power off
+  spi_writesingle(0x05, 0x0e);
+
+  // Power off charge pump
+  spi_writesingle(0x05, 0x02);
+
+  // Discharge
+  spi_writesingle(0x04, 0x0c);
+
+  delay_ms(120);
+
+  // Turn off chrage pumps
+  spi_writesingle(0x05, 0x00);
+
+  // Turn off osc
+  spi_writesingle(0x07, 0x0d);
+
+  // Discharge internal
+  spi_writesingle(0x04, 0x50);
+
+  delay_ms(40);
+
+  // Discharge internal
+  spi_writesingle(0x04, 0xa0);
+
+  delay_ms(40);
+
+  // Discharge internal
+  spi_writesingle(0x04, 0x00);
+
+  // All signals 0
+  GPIO_ResetBits(RESET_GPIO, RESET_PIN);
+  GPIO_ResetBits(PANEL_ON_GPIO, PANEL_ON_PIN);
+  GPIO_ResetBits(BORDER_CONTROL_GPIO, BORDER_CONTROL_PIN);
+  GPIO_ResetBits(EPD_CS_GPIO, EPD_CS_PIN);
+
+  // External discharge
+  GPIO_SetBits(DISCHARGE_GPIO, DISCHARGE_PIN);
+
+  delay_ms(150);
+
+  GPIO_ResetBits(DISCHARGE_GPIO, DISCHARGE_PIN);
+}
+
+void setup_gpio(void)
+{
   GPIO_InitTypeDef GPIO_InitStructure;
   SPI_InitTypeDef SPI_InitStructure;
   unsigned long PrescalerValue;
@@ -448,89 +590,32 @@ int main(void)
   TIM_CtrlPWMOutputs(TIM1, ENABLE);
 
   TIM_Cmd(TIM1, DISABLE);
+}
 
-  GPIO_ResetBits(RESET_GPIO, RESET_PIN);
-  GPIO_ResetBits(PANEL_ON_GPIO, PANEL_ON_PIN);
-  GPIO_ResetBits(DISCHARGE_GPIO, DISCHARGE_PIN);
-  GPIO_ResetBits(BORDER_CONTROL_GPIO, BORDER_CONTROL_PIN);
-  GPIO_ResetBits(EPD_CS_GPIO, EPD_CS_PIN);
-  
-  TIM_Cmd(TIM1, ENABLE);
+int main(void)
+{
+  int i;
+  int line;
+  int count;
 
-  delay_ms(5);
+  setup_gpio();
 
-  GPIO_SetBits(PANEL_ON_GPIO, PANEL_ON_PIN);
+  epd_power_on();
 
-  delay_ms(10);
+  epd_clear();
 
-  GPIO_SetBits(RESET_GPIO, RESET_PIN);
-  GPIO_SetBits(BORDER_CONTROL_GPIO, BORDER_CONTROL_PIN);
-  GPIO_SetBits(EPD_CS_GPIO, EPD_CS_PIN);
+  for (i=0; i<BYTES_PER_LINE * LINES_PER_DISPLAY; i++)
+    fb1.data[i] = venus_1_44_bits[i];
+  for (i=0; i<BYTES_PER_LINE * LINES_PER_DISPLAY; i++)
+    fb2.data[i] = aphrodite_1_44_bits[i];
 
-  delay_ms(5);
+  epd_image(0, &fb1);
 
-  GPIO_ResetBits(RESET_GPIO, RESET_PIN);
-  delay_ms(5);
+  delay_ms(1000);
 
-  GPIO_SetBits(RESET_GPIO, RESET_PIN);
-  delay_ms(5);
+  epd_image(&fb1, &fb2);
 
-  EpdWaitBusy();
-
-  unsigned char channel_select[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xff, 0x00};
-
-  spi_writecommand(0x01, channel_select, 8);  
-
-  // DC/DC frequency
-  spi_writesingle(0x06, 0xFF);
-
-  // high power mode osc
-  spi_writesingle(0x07, 0x9D);
-
-  // disable ADC
-  spi_writesingle(0x08, 0x00);
-
-  unsigned char vcom_level[] = {0xd0, 0x00};
-  spi_writecommand(0x09, vcom_level, 2);
-
-  spi_writesingle(0x04, 0x03);
-
-  delay_ms(5);
-
-  spi_writesingle(0x03, 0x01);
-  spi_writesingle(0x03, 0x00);
-
-  delay_ms(5);
-
-  spi_writesingle(0x05, 0x01);
-
-  delay_ms(30);
-
-  TIM_Cmd(TIM1, DISABLE);
-
-  GPIO_StructInit(&GPIO_InitStructure);
-  GPIO_InitStructure.GPIO_Pin =  GPIO_Pin_8;
-  GPIO_InitStructure.GPIO_Mode = GPIO_Mode_OUT;
-  GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-  GPIO_InitStructure.GPIO_OType = GPIO_OType_PP;
-  GPIO_Init(GPIOA, &GPIO_InitStructure);
-
-  GPIO_ResetBits(GPIOA, GPIO_Pin_8);
-
-  spi_writesingle(0x05, 0x0f);
-
-  delay_ms(30);
-
-  spi_writesingle(0x02, 0x24);
-
-  EpdClear();
-  {
-    int i;
-    for (i=0; i<32*96; i++)
-      frame_buffer[i] = 0xaa;
-  }
-  render(frame_buffer, char_0);
-  EpdImage(frame_buffer);
+  epd_power_off();
 
   while (1)
   {
